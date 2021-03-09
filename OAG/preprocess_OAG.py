@@ -27,6 +27,8 @@ args = parser.parse_args()
 venue_types = ['conference', 'journal', 'repository', 'patent']
 test_time_bar = 2016
 
+# Считаем кол-во цитирований для каждой статьи в исходном графе.
+# Далее будем отбрасывать статьи, которые не набирают нужного кол-ва цитирований.
 filename = 'PR%s_20190919.tsv' % args.domain
 print(f'Counting paper cites from {filename}...')
 filename = f'{args.input_dir}/{filename}'
@@ -59,8 +61,16 @@ with open(filename) as fin:
         venue_id = tokens[3]
         lang = tokens[4]
 
+        # Похоже на то, что это среднее кол-во цитирований в год.
+        # Т.е, например, с момента выхода статьи прошло 10 лет,
+        # и мы хотим, чтобы на эту статью ссылались не менее 10 раз.
+        # Иначе отбрасываем её.
+        # Но зачем здесь это ограничение на 20 лет?
+        # Получается, что все статьи от 2000 года должны цитироваться не менее 20 раз.
         bound = min(2020 - int(time), 20) * args.citation_bar
 
+        # Без скобок очень сложно. Почему тут and?
+        # Добавил скобки так, как происходит происходит приоритет операций.
         if ((cite_dict[paper_id] < bound) or paper_id == '' or time == '' or title == '') or \
                 (venue_id == '' and lang == '') or \
                 int(time) < 1900:
@@ -74,11 +84,18 @@ if args.cuda != -1:
 else:
     device = torch.device("cpu")
 
+# Считываем файл с аннотациями статей (abstract).
+# Получаем эмбеддинги, которые будут конкатенироваться
+# с остальными в utils.feature_OAG.
 filename = 'PAb%s_20190919.tsv' % args.domain
 print(f'Getting paper abstract embeddings. Abstracts are from {filename}...')
 filename = f'{args.input_dir}/{filename}'
 line_count = sum(1 for line in open(filename, 'r'))
 
+# Похоже, что предобученная модель.
+# "For each paper, we use a pre-trained XLNet [19, 20] to get the representation of each word in its title.
+# We then average them weighted by each word’s attention to get the title representation for each paper".
+# Однако, здесь мы получаем эмбеддинги аннотаций, а не заголовков!
 tokenizer = XLNetTokenizer.from_pretrained('xlnet-base-cased')
 model = XLNetModel.from_pretrained('xlnet-base-cased',
                                    output_hidden_states=True,
@@ -93,6 +110,7 @@ with open(filename) as fin:
             if paper_id in paper_nodes:
                 paper_node = paper_nodes[paper_id]
 
+                # Мутные замудрени с получением эмбеддинга текста (аннотации).
                 input_ids = torch.tensor([tokenizer.encode(paper_node['title'])]).to(device)[:, :64]
                 if len(input_ids[0]) < 4:
                     continue
@@ -103,6 +121,8 @@ with open(filename) as fin:
         except Exception as e:
             print(e)
 
+# ID вершин типа Venue, Filed, Affiliation, для которых имеются заранее вычисленные векторы.
+# Некоторые вершины затем отбрасываются, поэтому считывание самих векторов будет производиться позднее.
 filename = 'vfi_vector.tsv'
 print(f'Reading Venue/Filed/Affiliation nodes from {filename}...')
 filename = f'{args.input_dir}/{filename}'
@@ -116,6 +136,7 @@ with open(filename) as fin:
         node_id = tokens[0]
         vfi_ids[node_id] = True
 
+# Добавление Paper-Venue триплетов в граф.
 filename = 'Papers%s_20190919.tsv' % args.domain
 print(f'Reading Paper-Venue triples from {filename}...')
 filename = f'{args.input_dir}/{filename}'
@@ -133,19 +154,25 @@ with open(filename) as fin:
         venue_id = tokens[3]
         lang = tokens[4]
 
+        # Выбираются только статьи на английском,
+        # для которых посчитаны векторы,
+        # а также векторы для их Venue.
+        # Т.е., для того, чтобы добавить триплет, нам нужны векторы обеих вершин.
         if (paper_id not in paper_nodes) or (lang != 'en') or \
                 ('emb' not in paper_nodes[paper_id]) or (venue_id not in vfi_ids):
             continue
 
         remaining_nodes.append(paper_id)
-        venue_type = tokens[-2]
+        venue_type = tokens[-2]  # see `venue_types`
         venue_node = {'id': venue_id, 'type': 'venue', 'attr': venue_type}
         graph.add_edge(paper_nodes[paper_id], venue_node, time=int(tokens[1]), relation_type='PV_' + venue_type)
 
+# Удаляем неподходящие статьи (paper).
 org_count = len(paper_nodes)
 paper_nodes = {paper_id: paper_nodes[paper_id] for paper_id in remaining_nodes}
 print(f'Removed article count: {(org_count - len(paper_nodes)):,}')
 
+# Цитирования.
 filename = 'PR%s_20190919.tsv' % args.domain
 print(f'Reading Paper-Paper triples from {filename}...')
 filename = f'{args.input_dir}/{filename}'
@@ -161,8 +188,10 @@ with open(filename) as fin:
             p1 = paper_nodes[paper_id1]
             p2 = paper_nodes[paper_id2]
             if p1['time'] >= p2['time']:
+                # Статья p1 процитировала статью p2.
                 graph.add_edge(p1, p2, time=p1['time'], relation_type='PP_cite')
 
+# Непонятно
 filename = 'PF%s_20190919.tsv' % args.domain
 print(f'Reading FieldOfStudyIds from {filename}...')
 ffl = {}
@@ -179,6 +208,7 @@ with open(filename) as fin:
         if (paper_id in paper_nodes) and (field_id in vfi_ids):
             ffl[field_id] = True
 
+# Иеарахия Fields.
 filename = 'FHierarchy_20190919.tsv'
 print(f'Reading field hierarchy from {filename}...')
 filename = f'{args.input_dir}/{filename}'
@@ -193,15 +223,17 @@ with open(filename) as fin:
         child_level = tokens[2]  # L1/L2/L3/L4/L5
         parent_level = tokens[3]  # L0/L1/L2/L3/L4
 
+        # В граф добавляем только те Field-вершины,
+        # которые имеют связь с оставшимися Paper-вершинами.
         if (field_id1 in ffl) and (field_id2 in ffl):
             field_node1 = {'id': field_id1, 'type': 'field', 'attr': child_level}
             field_node2 = {'id': field_id2, 'type': 'field', 'attr': parent_level}
-
+            # field1 является подмножеством field2.
             graph.add_edge(field_node1, field_node2, relation_type='FF_in')
-
             ffl[field_id1] = field_node1
             ffl[field_id2] = field_node2
 
+# Paper-Field.
 filename = 'PF%s_20190919.tsv' % args.domain
 print(f'Reading Paper-Field triples from {filename}...')
 filename = f'{args.input_dir}/{filename}'
@@ -222,7 +254,7 @@ with open(filename) as fin:
 
 filename = 'PAuAf%s_20190919.tsv' % args.domain
 print(f'Reading Author-Affiliation triples from {filename}...')
-paper_authors = defaultdict(lambda: {})
+paper_authors = defaultdict(lambda: {})  # Авторы статьи.
 filename = f'{args.input_dir}/{filename}'
 line_count = sum(1 for line in open(filename))
 with open(filename) as fin:
@@ -232,17 +264,23 @@ with open(filename) as fin:
 
         paper_id = tokens[0]
         author_id = tokens[1]
-        affiliation_id = tokens[2]
+        affiliation_id = tokens[2]  # По сути, это учебное заведение, организация.
 
         if (paper_id in paper_nodes) and (affiliation_id in vfi_ids):
             paper_node = paper_nodes[paper_id]
             author_node = {'id': author_id, 'type': 'author'}
             affiliation_node = {'id': affiliation_id, 'type': 'affiliation'}
 
+            # Позиция автора в списке авторов статьи.
             position_in_author_list = int(tokens[-1])
             paper_authors[paper_id][position_in_author_list] = author_node
+            # Author имеет аффилиацию с данной организацией.
             graph.add_edge(author_node, affiliation_node, relation_type='in')
 
+# Между авторами и статьями определено три отношения:
+# 1) первый автор статьи;
+# 2) последний автор статьи;
+# 3) остальные.
 print('Adding Author-Paper triples...')
 for paper_id in tqdm(paper_authors):
     paper_node = paper_nodes[paper_id]
@@ -257,6 +295,9 @@ for paper_id in tqdm(paper_authors):
         else:
             graph.add_edge(author_node, paper_node, time=paper_node['time'], relation_type='AP_write_other')
 
+# Загрузка векторов для Venue, Field, Affiliation.
+# "For the field, venue, and institute nodes, we use the metapath2vec model [2]
+# to train their node embeddings by reflecting the heterogeneous network structures."
 filename = 'vfi_vector.tsv'
 print(f'Reading embeddings of Venue/Field/Affiliation nodes from {filename}...')
 filename = f'{args.input_dir}/{filename}'
@@ -273,7 +314,10 @@ with open(filename) as fin:
                 node_idx = graph.node_forward[node_type][node_id]
                 node = graph.node_backward[node_type][node_idx]
                 node['node_emb'] = np.array(node_feature_vector.split(' '))
+                # Кажется, здесь нужен break? Или одна вершина
+                # может принадлежать сразу нескольким типам?
 
+# Названия вершин.
 filename = 'SeqName%s_20190919.tsv' % args.domain
 print(f'Reading node names from {filename}...')
 filename = f'{args.input_dir}/{filename}'
@@ -296,18 +340,27 @@ with open(filename) as fin:
 
 '''
     Calculate the total citation information as node attributes.
+    
+    Для всех вершин, вне зависимости от их типа, мы добавляем атрибут 'citation',
+    который обозначает кол-во цитирований на разных "масштабах".
 '''
 print('Calculate the total citation information as node attributes...')
 for paper_idx, paper_node in enumerate(graph.node_backward['paper']):
+    # Кол-во ссылок на данную статью
+    # (информация в `cite_dict` уже некорректна, т.к. в граф включены не все статьи).
     paper_node['citation'] = len(graph.edge_list['paper']['paper']['PP_cite'][paper_idx])
 
 for author_idx, author_node in enumerate(graph.node_backward['author']):
     citation = 0
+    # Напомним, что между авторами и статьями может быть три отношения.
+    # При этом, здесь перебираются реверсивные связи,
+    # т.к. здесь target - это автор, а не статья, как было при добавлении триплетов.
     for rel in graph.edge_list['author']['paper'].keys():
         for paper_idx in graph.edge_list['author']['paper'][rel][author_idx]:
             paper_node = graph.node_backward['paper'][paper_idx]
             citation += paper_node['citation']
 
+    # Общее число ссылок на работы автора.
     author_node['citation'] = citation
 
 for affiliation_idx, affiliation_node in enumerate(graph.node_backward['affiliation']):
@@ -316,15 +369,18 @@ for affiliation_idx, affiliation_node in enumerate(graph.node_backward['affiliat
         author_node = graph.node_backward['author'][author_idx]
         citation += author_node['citation']
 
+    # Общее число ссылок на статьи, авторы которых имеют данную аффилиацию..
     affiliation_node['citation'] = citation
 
 for venue_idx, venue_node in enumerate(graph.node_backward['venue']):
     citation = 0
+    # Возможные отношения между Paper и Venue записаны в `venue_types`.
     for rel in graph.edge_list['venue']['paper'].keys():
         for paper_idx in graph.edge_list['venue']['paper'][rel][venue_idx]:
             paper_node = graph.node_backward['paper'][paper_idx]
             citation += paper_node['citation']
 
+    # Общее число ссылок на статьи, которые опубликованны в Venue.
     venue_node['citation'] = citation
 
 for field_idx, field_node in enumerate(graph.node_backward['field']):
@@ -334,6 +390,7 @@ for field_idx, field_node in enumerate(graph.node_backward['field']):
             paper_node = graph.node_backward['paper'][paper_idx]
             citation += paper_node['citation']
 
+    # Общее число ссылок на статьи, которые относятся к данной области исследований.
     field_node['citation'] = citation
 
 print('Done.')
@@ -345,29 +402,45 @@ print('Done.')
 '''
 print('Calculating embeddings for non-Paper nodes...')
 df = pd.DataFrame(graph.node_backward['paper'])
+# Для каждого типа вершины создаём DataFrame,
+# который содержит все атрибуты (включая эмбеддинги) каждой вершины данного типа.
 graph.node_feature = {'paper': df}
 paper_embeddings = np.array(list(df['emb']))
 
+# Перебираем все вершины, смежные с Paper-вершинами.
 for _type in graph.node_backward:
     if _type in ['paper', 'affiliation']:
         continue
 
     df = pd.DataFrame(graph.node_backward[_type])
     node_pairs = []
+    # relation_type
     for _rel in graph.edge_list[_type]['paper']:
         for target_idx in graph.edge_list[_type]['paper'][_rel]:
             for source_idx in graph.edge_list[_type]['paper'][_rel][target_idx]:
+                # Избегаем утечки: выбираем триплеты только из обучающей выборки.
                 if graph.edge_list[_type]['paper'][_rel][target_idx][source_idx] <= test_time_bar:
                     node_pairs += [[target_idx, source_idx]]
     if len(node_pairs) == 0:
         continue
 
+    # В транспонированной матрице первая строка будет содержать targets,
+    # вторая - sources.
     node_pairs = np.array(node_pairs).T
     edge_count = node_pairs.shape[1]
     v = np.ones(edge_count)
+    # Размерность матрицы: [кол-во вершин текущего типа, кол-во Paper-вершин]
     m = normalize(sp.coo_matrix((v, node_pairs),
                                 shape=(len(graph.node_backward[_type]), len(graph.node_backward['paper']))))
 
+    # From http://tkipf.github.io/graph-convolutional-networks/:
+    # The second major limitation is that A is typically not normalized and therefore the multiplication with A
+    # will completely change the scale of the feature vectors
+    # (we can understand that by looking at the eigenvalues of A).
+    # Normalizing A such that all rows sum to one, i.e. D^(−1)A,
+    # where D is the diagonal node degree matrix, gets rid of this problem.
+    # Multiplying with D(−1)A now corresponds to taking the average of neighboring node features.
+    # Получаем векторы для вершин умножением нормализованной матрицы смежности на векторы Paper-вершин.
     out = m.dot(paper_embeddings)
     df['emb'] = list(out)
     graph.node_feature[_type] = df
@@ -395,6 +468,7 @@ graph.node_feature['affiliation'] = df
 print('Done.')
 print()
 print('Cleaning edge list...')
+# Удаление из graph.edge_list пустых значений.
 clean_edge_list = {}
 # target_type
 for k1 in graph.edge_list:

@@ -1,5 +1,7 @@
 # Heterogeneous Graph Transformer (HGT)
 
+> **kalinin-sanja**. Комментарии к коду на русском языке. Также использовались цитаты из оригинальной статьи и других интернет-источников.
+
 **UPDATE**: HGT is the current SOTA result on the [*Stanford OGBN-MAG dataset*](https://ogb.stanford.edu/docs/leader_nodeprop/). The codes are also avaiable in this repo.
 
 [Alternative reference Deep Graph Library (DGL) implementation](https://github.com/dmlc/dgl/tree/master/examples/pytorch/hgt)

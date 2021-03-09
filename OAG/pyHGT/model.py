@@ -60,21 +60,39 @@ class GNN(nn.Module):
         self.n_hid     = n_hid
         self.adapt_ws  = nn.ModuleList()
         self.drop      = nn.Dropout(dropout)
+
+        # Для каждого типа вершин создаём свой линейный слой.
+        #
+        # "The homogeneous GNN baselines assume the node features belong to the same distribution,
+        # while our feature extraction doesn’t fulfill this assumption. To make a fair comparison,
+        # we add an adaptation layer between the input features and all used GNNs.
+        # This module simply conducts different linear projections for nodes of different types.
+        # Such a procedure can be regarded to map heterogeneous data into the same distribution,
+        # which is also adopted in literature [18, 22]".
         for t in range(num_types):
             self.adapt_ws.append(nn.Linear(in_dim, n_hid))
+
+        # Добавляем слои HGT (или другие).
         for l in range(n_layers - 1):
             self.gcs.append(GeneralConv(conv_name, n_hid, n_hid, num_types, num_relations, n_heads, dropout, use_norm = prev_norm, use_RTE = use_RTE))
         self.gcs.append(GeneralConv(conv_name, n_hid, n_hid, num_types, num_relations, n_heads, dropout, use_norm = last_norm, use_RTE = use_RTE))
 
     def forward(self, node_feature, node_type, edge_time, edge_index, edge_type):
         res = torch.zeros(node_feature.size(0), self.n_hid).to(node_feature.device)
+        # Для каждого типа вершин прогоняем через соответствующий слой векторы вершин с данным типом.
         for t_id in range(self.num_types):
             idx = (node_type == int(t_id))
             if idx.sum() == 0:
                 continue
             res[idx] = torch.tanh(self.adapt_ws[t_id](node_feature[idx]))
+
+        # После этого вектор каждой вершины имеет размерность `h_dim`.
+
+        # Dropout
         meta_xs = self.drop(res)
         del res
+
+        # Прогоняем через слои трансформера.
         for gc in self.gcs:
             meta_xs = gc(meta_xs, node_type, edge_index, edge_type, edge_time)
         return meta_xs  
