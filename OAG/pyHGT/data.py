@@ -17,17 +17,22 @@ from functools import partial
 import multiprocessing as mp
 
 class Graph():
+    """
+    Структура графа. Используем постфикс "gid" для того,
+    чтобы указать уникальный идентификатор вершины в этой структуре.
+    При этом, вершины разного типа имеют свою нумерацию, поэтому их индексы могут совпадать.
+    """
     def __init__(self):
         super(Graph, self).__init__()
         '''
             node_forward and node_backward are only used when building the data. 
             Afterwards will be transformed into node_feature by DataFrame
             
-            node_forward: name -> node_id
+            node_forward: name -> node_gid
             node_backward: node_id -> feature_dict
             node_feature: a DataFrame containing all features
         '''
-        self.node_forward = defaultdict(lambda: {})  # [node_type][node_id] = node_idx
+        self.node_forward = defaultdict(lambda: {})  # [node_type][node_id] = node_gid
         self.node_backward = defaultdict(lambda: [])  # [node_type] = list of node objects
         # Задаётся извне класса, при считывании данных в preprocess_OAG.py.
         self.node_feature = defaultdict(lambda: [])
@@ -39,13 +44,13 @@ class Graph():
         self.edge_list = defaultdict( #target_type
                             lambda: defaultdict(  #source_type
                                 lambda: defaultdict(  #relation_type
-                                    lambda: defaultdict(  #target_id
-                                        lambda: defaultdict( #source_id(
+                                    lambda: defaultdict(  #target_gid
+                                        lambda: defaultdict( #source_gid(
                                             lambda: int # time
                                         )))))
         self.times = {}
 
-    # Возвращает индекс вершины.
+    # Возвращает индекс вершины (gid).
     # У каждого типа вершин своя нумерация!
     def add_node(self, node):
         node_id = node['id']
@@ -53,11 +58,11 @@ class Graph():
         id2idx = self.node_forward[node_type]
 
         if node_id not in id2idx:
-            # Позиция вершины в массиве self.node_backward[node_type] есть её индекс node_idx.
+            # Позиция вершины в массиве self.node_backward[node_type] есть её индекс node_gid.
             self.node_backward[node_type] += [node]
-            node_idx = len(id2idx)
-            id2idx[node_id] = node_idx
-            return node_idx
+            node_gid = len(id2idx)
+            id2idx[node_id] = node_gid
+            return node_gid
         
         return id2idx[node_id]
 
@@ -78,13 +83,13 @@ class Graph():
         
     def update_node(self, node):
         nodes = self.node_backward[node['type']]
-        node_idx = self.add_node(node)
+        node_gid = self.add_node(node)
         # Похоже, что это просто считывание атрибутов вершины.
-        # Однако, `node` и `nodes[node_idx]` должны указывать на один объект.
+        # Однако, `node` и `nodes[node_gid]` должны указывать на один объект.
         # Есть ли смысл в таких заморочках?
         for k in node:
-            if k not in nodes[node_idx]:
-                nodes[node_idx][k] = node[k]
+            if k not in nodes[node_gid]:
+                nodes[node_gid][k] = node[k]
 
     # Список кортежей - мета-триплетов.
     def get_meta_graph(self):
@@ -115,52 +120,53 @@ def sample_subgraph(graph, time_range, sampled_depth = 2, sampled_number = 8, in
                                     lambda: defaultdict(  #source_id
                                         lambda: [0., 0] #[sampled_score, time]
                             ))
+    # TODO: неиспользуемая переменная
     new_layer_adj  = defaultdict( #target_type
                                     lambda: defaultdict(  #source_type
                                         lambda: defaultdict(  #relation_type
                                             lambda: [] #[target_id, source_id]
                                 )))
-    # Текст не дописан!
+    # TODO: Текст не дописан!
     '''
         For each node being sampled, we find out all its neighborhood, 
         adding the degree count of these nodes in the budget.
         Note that there exist some nodes that have many neighborhoods
         (such as fields, venues), for those case, we only consider 
     '''
-    def add_budget(te, target_id, target_time, layer_data, budget):
+    def add_budget(te, target_gid, target_time, layer_data, budget):
         # te = graph.edge_list[target_type]
-        # Перечисляем триплеты, которые содержат target_id (именно на позиции target-вершины).
+        # Перечисляем триплеты, которые содержат target_gid (именно на позиции target-вершины).
         for source_type in te:
             tes = te[source_type]
             for relation_type in tes:
-                if relation_type == 'self' or target_id not in tes[relation_type]:
+                if relation_type == 'self' or target_gid not in tes[relation_type]:
                     continue
 
                 # Список source-вершин для данной target-вершины.
-                adl = tes[relation_type][target_id]
+                adl = tes[relation_type][target_gid]
                 # Выбираем из них только sampled_number вершин.
                 if len(adl) < sampled_number:
-                    sampled_ids = list(adl.keys())
+                    sampled_gids = list(adl.keys())
                 else:
-                    sampled_ids = np.random.choice(list(adl.keys()), sampled_number, replace = False)
+                    sampled_gids = np.random.choice(list(adl.keys()), sampled_number, replace = False)
 
                 # Перебираем их.
-                for source_id in sampled_ids:
-                    source_time = adl[source_id]
+                for source_gid in sampled_gids:
+                    source_time = adl[source_gid]
                     if source_time == None:
                         source_time = target_time
 
                     # Если вершина уже используется как target среди текущих, то не рассматриваем её.
-                    if (source_time > np.max(list(time_range.keys()))) or (source_id in layer_data[source_type]):
+                    if (source_time > np.max(list(time_range.keys()))) or (source_gid in layer_data[source_type]):
                         continue
 
-                    # Степень вершины считают как len(sampled_ids) ???
+                    # Степень вершины считают как len(sampled_gids) ???
                     # Кумулятивная нормализованная степень.
                     # `budget` не разделяется на отношения (relation),
                     # но для каждого отношения нормазилованная степень считается отдельно.
                     # Больше похоже на вероятность перехода в эту вершину из target-вершины.
-                    budget[source_type][source_id][0] += 1. / len(sampled_ids)
-                    budget[source_type][source_id][1] = source_time
+                    budget[source_type][source_gid][0] += 1. / len(sampled_gids)
+                    budget[source_type][source_gid][1] = source_time
 
     '''
         First adding the sampled nodes then updating budget.
@@ -168,7 +174,7 @@ def sample_subgraph(graph, time_range, sampled_depth = 2, sampled_number = 8, in
     # Инициализация `layer_data`.
     # Изначально `layer_data` содержит seed-target вершины.
     for node_type in inp.keys():
-        for node_id, _time in inp[node_type]:
+        for node_gid, _time in inp[node_type]:
             # Индексируем вершины.
             # _time - время триплета, в котором данная вершина является target.
             # Получается, что, если вершина встречалась как target в нескольких триплетах,
@@ -177,15 +183,15 @@ def sample_subgraph(graph, time_range, sampled_depth = 2, sampled_number = 8, in
             # Затем встретили пару [5, time2], записали её как [1, time2].
             # Т.е., мы потеряем значение, которое хранилось под индексом 0!
             # НО! Если мы рассматриваем связь Venue-Paper, то paper не должен встречаться больше одного раза.
-            layer_data[node_type][node_id] = [len(layer_data[node_type]), _time]
+            layer_data[node_type][node_gid] = [len(layer_data[node_type]), _time]
 
     # Выбираем вершины
     for node_type in inp.keys():
         te = graph.edge_list[node_type]
         # Перебираем seed-target вершины.
-        for node_id, _time in inp[node_type]:
-            # Добавляем в `budget` вершины (sources), смежные с node_id (target).
-            add_budget(te, node_id, _time, layer_data, budget)
+        for node_gid, _time in inp[node_type]:
+            # Добавляем в `budget` вершины (sources), смежные с node_gid (target).
+            add_budget(te, node_gid, _time, layer_data, budget)
     '''
         We recursively expand the sampled graph by sampled_depth.
         Each time we sample a fixed number of nodes for each budget,
@@ -203,12 +209,12 @@ def sample_subgraph(graph, time_range, sampled_depth = 2, sampled_number = 8, in
             te = graph.edge_list[source_type]
 
             # source_ids
-            keys  = np.array(list(budget[source_type].keys()))
-            if sampled_number > len(keys):
+            gids  = np.array(list(budget[source_type].keys()))
+            if sampled_number > len(gids):
                 '''
                     Directly sample all the nodes
                 '''
-                sampled_ids = np.arange(len(keys))  # Это индексы!
+                sampled_idxs = np.arange(len(gids))  # Это индексы!
             else:
                 '''
                     Sample based on accumulated degree
@@ -219,35 +225,35 @@ def sample_subgraph(graph, time_range, sampled_depth = 2, sampled_number = 8, in
                 # Нормализуем каждый коэффициент делением на сумму полученных квадратов.
                 score = score / np.sum(score)
                 # А потом случайно выбираем вершины согласно получившимся вероятностям.
-                sampled_ids = np.random.choice(len(score), sampled_number, p = score, replace = False) 
+                sampled_idxs = np.random.choice(len(score), sampled_number, p = score, replace = False)
 
-            sampled_keys = keys[sampled_ids]
+            sampled_gids = gids[sampled_idxs]
             '''
                 First adding the sampled nodes then updating budget.
             '''
-            for k in sampled_keys:
-                layer_data[source_type][k] = [len(layer_data[source_type]), budget[source_type][k][1]]
-            for k in sampled_keys:
-                add_budget(te, k, budget[source_type][k][1], layer_data, budget)
+            for gid in sampled_gids:
+                layer_data[source_type][gid] = [len(layer_data[source_type]), budget[source_type][gid][1]]
+            for gid in sampled_gids:
+                add_budget(te, gid, budget[source_type][gid][1], layer_data, budget)
                 # Удаляем вершину из `budget`, но в `layer_data` она остаётся.
-                budget[source_type].pop(k)   
+                budget[source_type].pop(gid)
     '''
         Prepare feature, time and adjacency matrix for the sampled graph
     '''
     feature, times, indxs, texts = feature_extractor(layer_data, graph)
 
     # Формат отличается от edge_list класса Graph.
-    edge_list = defaultdict( #target_type
+    sampled_edge_list = defaultdict( #target_type
                         lambda: defaultdict(  #source_type
                             lambda: defaultdict(  #relation_type
-                                lambda: [] # [target_id, source_id] 
+                                lambda: []  # [target_id, source_id]
                                     )))
     # Добавляем петли (relation_type = 'self').
     for node_type in layer_data:
-        for _key in layer_data[node_type]:
+        for node_gid in layer_data[node_type]:
             # Индекс вершины в сэмплированном подграфе.
-            _ser = layer_data[node_type][_key][0]
-            edge_list[node_type][node_type]['self'] += [[_ser, _ser]]
+            node_sid = layer_data[node_type][node_gid][0]
+            sampled_edge_list[node_type][node_type]['self'] += [[node_sid, node_sid]]
     '''
         Reconstruct sampled adjacancy matrix by checking whether each
         link exist in the original graph
@@ -260,22 +266,22 @@ def sample_subgraph(graph, time_range, sampled_depth = 2, sampled_number = 8, in
             sld  = layer_data[source_type]
             for relation_type in tes:
                 tesr = tes[relation_type]
-                for target_key in tld:
-                    if target_key not in tesr:
+                for target_gid in tld:
+                    if target_gid not in tesr:
                         continue
-                    target_ser = tld[target_key][0]
-                    for source_key in tesr[target_key]:
+                    target_sid = tld[target_gid][0]
+                    for source_gid in tesr[target_gid]:
                         '''
                             Check whether each link (target_id, source_id) exist in original adjacancy matrix
                         '''
-                        if source_key in sld:
-                            source_ser = sld[source_key][0]
+                        if source_gid in sld:
+                            source_sid = sld[source_gid][0]
                             # Новые индексы вершин в выделенном подграфе.
-                            edge_list[target_type][source_type][relation_type] += [[target_ser, source_ser]]
+                            sampled_edge_list[target_type][source_type][relation_type] += [[target_sid, source_sid]]
 
-    return feature, times, edge_list, indxs, texts
+    return feature, times, sampled_edge_list, indxs, texts
 
-# Первые три аргументы посчитаны для сэмплированного подграфа.
+# Первые три аргумента посчитаны для сэмплированного подграфа.
 def to_torch(feature, time, edge_list, graph):
     '''
         Transform a sampled sub-graph into pytorch Tensor
@@ -322,8 +328,11 @@ def to_torch(feature, time, edge_list, graph):
                     edge_type  += [edge_dict[relation_type]]
                     '''
                         Our time ranges from 1900 - 2020, largest span is 120.
+
+                        https://github.com/acbull/pyHGT/issues/7
+                        Разность между датами может быть отрицательной,
+                        поэтому к выражению добавляется разница между наименьшей и наибольшей датами (120 лет).
                     '''
-                    # TODO: Непонятно!
                     edge_time  += [node_time[tid] - node_time[sid] + 120]
 
     node_feature = torch.FloatTensor(node_feature)  # [n_sampled_nodes, n_features]

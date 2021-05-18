@@ -25,7 +25,9 @@ class Matcher(nn.Module):
         self.sqrt_hd  = math.sqrt(n_hid)
         self.cache      = None
     def forward(self, x, y, infer = False, pair = False):
+        # Статьи пропускаем через второй слой.
         ty = self.right_linear(y)
+        # Авторов - через первый.
         if infer:
             '''
                 During testing, we will consider millions or even billions of nodes as candidates (x).
@@ -40,9 +42,13 @@ class Matcher(nn.Module):
         else:
             tx = self.left_linear(x)
         if pair:
+            # Применяется в случае Author Disambiguation.
+            # TODO: поэлементное произведение?
             res = (tx * ty).sum(dim=-1)
         else:
             res = torch.matmul(tx, ty.transpose(0,1))
+
+        # TODO: для чего делить каждый элемент вектора на корень его размерности?
         return res / self.sqrt_hd
     def __repr__(self):
         return '{}(n_hid={})'.format(
